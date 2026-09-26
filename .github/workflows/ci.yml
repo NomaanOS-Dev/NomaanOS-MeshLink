@@ -1,0 +1,22 @@
+name: MeshLink CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    - name: Syntax Compilation Check
+      run: python -m py_compile mesh_node.py mesh_cli.py test_mesh.py
+    - name: Run Cryptographic & Lifecycle Unit Tests
+      run: python -m unittest test_mesh.py
+    - name: Run CLI Test Probe
+      run: python mesh_cli.py test-probe
