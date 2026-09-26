@@ -12,10 +12,11 @@ BROADCAST_ADDR = "255.255.255.255"
 SHARED_MESH_KEY = b"nomaanos-mesh-secret-v1"
 
 class MeshLinkNode:
-    def __init__(self, node_id=None, port=DEFAULT_PORT):
+    def __init__(self, node_id=None, port=DEFAULT_PORT, target_ports=None):
         self.port = port
-        self.node_id = node_id or f"node-{os.uname().nodename}-{int(time.time()) % 10000}"
-        self.peers = {}  # {node_id: {"ip": ip, "last_seen": ts, "status": "ALIVE", "uptime": s}}
+        self.target_ports = target_ports or [DEFAULT_PORT]
+        self.node_id = node_id or f"node-{os.uname().nodename}-{int(time.time() * 1000) % 100000}"
+        self.peers = {}
         self.running = False
         self._lock = threading.Lock()
 
@@ -36,12 +37,17 @@ class MeshLinkNode:
     def start_receiver(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if hasattr(socket, "SO_REUSEPORT"):
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            except Exception:
+                pass
         try:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         except Exception:
             pass
         sock.bind(("", self.port))
-        sock.settimeout(1.0)
+        sock.settimeout(0.5)
 
         while self.running:
             try:
@@ -56,7 +62,6 @@ class MeshLinkNode:
                     with self._lock:
                         self.peers[sender_id] = {
                             "ip": addr[0],
-                            "port": addr[1],
                             "last_seen": time.time(),
                             "status": "ALIVE",
                             "role": payload.get("role", "edge-peer")
@@ -67,7 +72,7 @@ class MeshLinkNode:
                 pass
         sock.close()
 
-    def start_broadcaster(self, interval=2.0):
+    def start_broadcaster(self, interval=1.0):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
@@ -80,13 +85,25 @@ class MeshLinkNode:
                     "sys_arch": os.uname().machine
                 }
                 signed_packet = self._sign_payload(payload)
-                sock.sendto(json.dumps(signed_packet).encode("utf-8"), (BROADCAST_ADDR, self.port))
+                msg = json.dumps(signed_packet).encode("utf-8")
+                
+                # Send to all target discovery ports
+                for p in self.target_ports:
+                    # Send loopback for local tests and broadcast for network
+                    try:
+                        sock.sendto(msg, ("127.0.0.1", p))
+                    except Exception:
+                        pass
+                    try:
+                        sock.sendto(msg, (BROADCAST_ADDR, p))
+                    except Exception:
+                        pass
             except Exception:
                 pass
             time.sleep(interval)
         sock.close()
 
-    def start_failure_detector(self, interval=2.0):
+    def start_failure_detector(self, interval=1.5):
         while self.running:
             now = time.time()
             with self._lock:
@@ -102,20 +119,16 @@ class MeshLinkNode:
 
     def start(self):
         self.running = True
-        t_recv = threading.Thread(target=self.start_receiver, daemon=True)
-        t_bcast = threading.Thread(target=self.start_broadcaster, daemon=True)
-        t_fd = threading.Thread(target=self.start_failure_detector, daemon=True)
-
-        t_recv.start()
-        t_bcast.start()
-        t_fd.start()
+        threading.Thread(target=self.start_receiver, daemon=True).start()
+        threading.Thread(target=self.start_broadcaster, daemon=True).start()
+        threading.Thread(target=self.start_failure_detector, daemon=True).start()
 
     def get_topology(self):
         with self._lock:
             return {
                 "local_node": self.node_id,
                 "active_peer_count": len([p for p in self.peers.values() if p["status"] == "ALIVE"]),
-                "peers": self.peers
+                "peers": dict(self.peers)
             }
 
     def stop(self):
